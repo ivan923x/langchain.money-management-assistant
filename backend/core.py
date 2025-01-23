@@ -1,16 +1,16 @@
 from dotenv import load_dotenv
 from typing import Any, Dict, List
 from datetime import datetime
-import pytz
+# import pytz
 
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from langchain.chains.llm import LLMChain
-from langchain_core.runnables import RunnableBranch
+# from langchain.chains.llm import LLMChain
+# from langchain_core.runnables import RunnableBranch
 from langchain_core.runnables.passthrough import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
-from langchain_core.runnables import RunnableLambda
+# from langchain_core.runnables import RunnableLambda
 
 from langchain_core.runnables.router import RouterRunnable
 
@@ -21,16 +21,22 @@ from langchain_core.runnables.router import RouterRunnable
 load_dotenv()
 
 
+def run_llm(user_prompt: str, chat_history: List[Dict[str, Any]] = []) -> str:
+    """
+    Run the chatbot with the given user prompt and chat history.
 
-def run(user_prompt: str, chat_history: List[Dict[str, Any]] = []) -> str:
-
-    llm = ChatOpenAI(
-        temperature=0,
-        model_name="gpt-3.5-turbo"
-    )
+    ：param user_prompt: The user prompt.
+    ：param chat_history: The chat history.
+    ：return: The response from the chatbot.
+    """
+    llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo")
     current_time = datetime.now()
 
-    prompt = {
+    # A list of prompt templates for different functionalities
+    # parse: Parse user input and chat history to generate transaction records
+    # insert: Insert transaction records
+    prompts = {
+        # 分析記帳資料的 prompt
         "parse": """
         你是一名會計師，試著將對話紀錄與使用者輸入中的記帳資料和修改意見，依照規則將資料格式化成表格，並請按照輸出規則回覆不要包含額外的說明文字。
 
@@ -76,17 +82,14 @@ def run(user_prompt: str, chat_history: List[Dict[str, Any]] = []) -> str:
         """,
         # "review": """
         # 以下是目前的對話歷史，包含已解析的表格內容:
-
         # <<對話歷史>>
         # {chat_history}
-
         # 請根據使用者輸入修改表格內容。
-
         # <<使用者輸入>>
         # {input}
-
         # 返回修改後的表格。
         # """,
+        # 新增記帳資料的 prompt
         "insert": """
         試著根據對話紀錄與使用者輸入中的記帳資料表格轉換成JSON格式，並請按照輸出規則回覆不要包含額外的說明文字。
 
@@ -133,12 +136,15 @@ def run(user_prompt: str, chat_history: List[Dict[str, Any]] = []) -> str:
         """,
     }
 
-
-    parse_input_chain = PromptTemplate(
-        template=prompt['parse'],
-        input_variables=["input","chat_history","current_time"],
-        output_parser=StrOutputParser(),
-    ) | llm
+    # 分析輸入產生記帳資料以產生 交易記錄
+    parse_input_chain = (
+        PromptTemplate(
+            template=prompts["parse"],
+            input_variables=["input", "chat_history", "current_time"],
+            output_parser=StrOutputParser(),
+        )
+        | llm
+    )
 
     # review_chain = PromptTemplate(
     #     template=prompt[''],
@@ -146,33 +152,36 @@ def run(user_prompt: str, chat_history: List[Dict[str, Any]] = []) -> str:
     #     output_parser=StrOutputParser(),
     # ) | llm
 
-    insert_chain = PromptTemplate(
-        template=prompt['insert'],
-        input_variables=["input"],
-        # output_parser=StrOutputParser(),
-    ) | llm
+    # 新增 交易記錄 至資料庫
+    insert_chain = (
+        PromptTemplate(
+            template=prompts["insert"],
+            input_variables=["input"],
+            # output_parser=StrOutputParser(),
+        )
+        | llm
+    )
 
-    default_chain = PromptTemplate.from_template("""
+    # Fall back to default chain if no other chain is matched in the router
+    default_chain = (
+        PromptTemplate.from_template(
+            """
     重複回覆以下內容:
     我無法理解你的輸入，或者該功能目前不被支持，請嘗試重新輸入或描述你的需求
-    """) | llm | StrOutputParser()
-
-
-    route_list = [
-        {
-            "name": "parse",
-            "description": "解析記帳資料",
-            "chain": parse_input_chain
-        },
-        {
-            "name": "review",
-            "description": "修改記帳資料表",
-            "chain": parse_input_chain
-        },
+    """
+        )
+        | llm
+        | StrOutputParser()
+    )
+    # Chain router, which routes the input to different chains based on the input
+    # 依照使用者輸入的內容，將輸入導向不同的功能
+    command_list = [
+        {"name": "parse", "description": "解析記帳資料", "chain": parse_input_chain},
+        {"name": "review", "description": "修改記帳資料表", "chain": parse_input_chain},
         {
             "name": "insert",
             "description": "記帳資料表正確，將新增資料至資料庫",
-            "chain": insert_chain
+            "chain": insert_chain,
         },
         # {
         #     "name": "query_balance",
@@ -187,18 +196,20 @@ def run(user_prompt: str, chat_history: List[Dict[str, Any]] = []) -> str:
         {
             "name": "exception",
             "description": "未知、未支援的功能",
-            "chain": default_chain
+            "chain": default_chain,
         },
     ]
-    func_desc_list = ""
-    destination_chains = {}
-    for cmd in route_list:
-        func_desc_list = f"{func_desc_list}\n{cmd['name']}: {cmd['description']}"
-        destination_chains[cmd['name']] = cmd['chain']
 
+    # 產生一個功能名稱與功能描述的字串 func_desc_list 及
+    chain_func_desc_list = ""
+    chain_dict = {}  
+    """一個功能名稱與功能對應的字典, map {key: chain}, 要放到 RouterRunnable 裡面. 以 command_list 中的 name 為 key, chain 為 value"""
+    for command in command_list:
+        chain_func_desc_list = f"{chain_func_desc_list}\n{command['name']}: {command['description']}"
+        chain_dict[command["name"]] = command["chain"]
 
-
-    route_prompt = """
+    # 產生路由 key 值的 prompt. 
+    command_name_prompt = """
     你是記帳助理，請根據對話歷史判斷當前需要執行的功能，並請返回功能名稱，如果不適用任何功能請返回"exception":
     <對話歷史>
     {chat_history}
@@ -206,16 +217,33 @@ def run(user_prompt: str, chat_history: List[Dict[str, Any]] = []) -> str:
     {input}
     <可用功能(名稱:描述)>
     {func_desc_list}
-    """.replace("{func_desc_list}",func_desc_list)
+    """.replace(
+        "{func_desc_list}", chain_func_desc_list
+    )
+    
+    # Command Chain Router chain: 依照使用者輸入的內容，輸出對應的功能名稱 (command key)
+    # Input: user_prompt, chat_history, current_time
+    # Return the key of the selected executable chain
+    command_name_chain = PromptTemplate.from_template(command_name_prompt) | llm | StrOutputParser()
+    
+    # Router runner
+    # Input: the key of the selected executable chain and the input value of the selected runnable: {key: command_name_chain, input: user_prompt}  
+    # Process: select the runnable chain based on the key value and run the selected chain with the input value
+    command_router_runnable = RouterRunnable(chain_dict)
 
-    route = PromptTemplate.from_template(route_prompt) | llm | StrOutputParser()
-    router = RouterRunnable(destination_chains)
+    command_router_chain = {
+        # The (lambda x:x) seems redundant.
+        # "key": command_name_chain | (lambda x: x),  # Use the user input and chat history to determine the command key
+        "key": command_name_chain,  # Use the user input and chat history to determine the command key
+        "input": RunnablePassthrough(), # User 的 input
+    } | command_router_runnable
 
-    router_chain = {
-        "key": route | (lambda x: x),
-        "input": RunnablePassthrough()
-    } | router
-
-    response = router.stream(input={"input":user_prompt, "chat_history":chat_history, "current_time":current_time})
+    response = command_router_chain.stream(
+        input={
+            "input": user_prompt, #input
+            "chat_history": chat_history, #key
+            "current_time": current_time, #key
+        }
+    )
 
     return response
